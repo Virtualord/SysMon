@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref instead of queueing them.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Reduce the amount of disk the CI runner needs for the build cache.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  checks:
+    name: fmt, check, clippy, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel and components, so this step installs
+      # stable with rustfmt and clippy and nothing else.
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo dependencies and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: syswatch
+
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        run: cargo check --all-targets --locked
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --locked -- --nocapture
+
+      - name: cargo build --release
+        run: cargo build --release --locked
+
+      # A release build that cannot answer --version is not a release build.
+      - name: Smoke test the binary
+        run: |
+          ./target/release/syswatch --version
+          ./target/release/syswatch --help > /dev/null
+          ./target/release/syswatch --dump-config > /dev/null
+          ./scripts/collect.sh --json | python3 -m json.tool > /dev/null
+
+  shellcheck:
+    name: shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y shellcheck
+
+      - name: Lint the shell scripts
+        run: |
+          shellcheck --severity=warning install.sh uninstall.sh scripts/launcher.sh scripts/collect.sh
+
+      - name: Check the shell scripts parse
+        run: |
+          for script in install.sh uninstall.sh scripts/launcher.sh scripts/collect.sh; do
+            bash -n "${script}"
+          done

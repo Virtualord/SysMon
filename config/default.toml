@@ -1,0 +1,56 @@
+# Default syswatch configuration.
+#
+# Location: ~/.config/syswatch/config.toml
+# This file documents every available option with its default value. Copy it and
+# change only what you need; unknown keys are rejected so a typo cannot silently
+# disable a setting.
+#
+# After editing, restart syswatch. Press `?` in the app for the keyboard reference.
+
+# Seconds between two samples. Clamped to 0.1 ..= 3600. sysinfo needs at least
+# 200 ms between CPU refreshes to compute meaningful deltas, so values below that
+# behave like 200 ms rather than producing noisy numbers.
+refresh_interval = 1.0
+
+# Colour theme: "dark", "light" or "monochrome".
+# "monochrome" only uses the terminal's own 16 colours, which is the safest choice
+# on a palette you do not control. `--no-color` selects it as well.
+theme = "dark"
+
+# Dashboard shown at start-up: "cpu", "memory", "processes", "storage", "network"
+# or "system". The number keys 1-6 always work regardless of this setting.
+default_view = "cpu"
+
+# Number of samples retained per graph. Clamped to 16 ..= 4096. At the default
+# interval of one second, 120 samples is two minutes of history.
+graph_history = 120
+
+# Use Unicode block characters for bars and gauges. Set to false for terminals that
+# cannot render the block elements; the `g` key toggles it at runtime.
+unicode_graphs = true
+
+# Which processes the table shows: "all", "user" (only your own) or "tasks"
+# (only processes with a command line, which excludes most kernel threads).
+# The `f` key cycles this at runtime.
+process_filter = "all"
+
+# Network interfaces to monitor. An empty list means "every interface except
+# loopback". Naming an interface explicitly always includes it, even "lo".
+network_interfaces = []
+
+# Show the temperature rows when the kernel exposes sensors. Machines without
+# hwmon devices or without lm-sensors show N/A; set to false to hide the section.
+show_temperatures = true
+
+# Include kernel pseudo filesystems (tmpfs, proc, cgroup, ...) in the storage view.
+# Off by default because they are not real disks and their "full" state is normal.
+show_pseudo_filesystems = false
+
+# Show the 1/5/15 minute load averages in the header.
+show_load_average = true
+
+# Initial process sort order. `key` is "cpu", "memory", "pid" or "name";
+# `descending` is true for largest first.
+[process_sort]
+key = "cpu"
+descending = true
