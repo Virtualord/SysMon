@@ -61,9 +61,10 @@ memory, user and state. Arrow keys and `PageUp`/`PageDown` move the selection,
 state, and `k` opens a confirmation dialog that can send `SIGTERM` or `SIGKILL`.
 Processes that exit mid-refresh are reported, never crashed on.
 
-**Storage** — every mount from `/proc/mounts` with capacity from `statvfs`, classified
-as physical, virtual, network or pseudo so a full `tmpfs` is not mistaken for a full
-disk.
+**Storage** — the physical disk inventory (model, firmware, bus, capacity, and each
+drive's temperature against its critical threshold), then every mount from
+`/proc/mounts` with capacity from `statvfs`, classified as physical, virtual, network
+or pseudo so a full `tmpfs` is not mistaken for a full disk.
 
 **Network** — per-interface receive and transmit throughput, cumulative totals, MAC
 address, link state and error counters, with live graphs. Throughput is a rate
@@ -253,6 +254,7 @@ unicode_graphs = true           # false for terminals without block characters
 process_filter = "all"          # all | user | tasks
 network_interfaces = []         # empty means every interface except loopback
 show_temperatures = true
+show_disk_health = true         # physical disk inventory on the storage view
 show_pseudo_filesystems = false
 show_load_average = true
 
@@ -306,6 +308,73 @@ still use, so the root reserve is not counted as free. Used is the difference.
 `sysinfo`. A machine without sensors, or one where `lm-sensors` has not been run,
 shows `N/A` rather than a fabricated value.
 
+**Disk temperatures are attributed to drives, not just listed.** `/sys/class/hwmon`
+reports a sensor as `nvme` with a label of `Composite`; on a machine with two identical
+drives that is ambiguous. syswatch canonicalises both `/sys/block/<dev>/device` and
+`/sys/class/hwmon/hwmonN/device` to the same controller node and matches on that, so
+each drive shows its own temperature. Wear percentage is deliberately absent; see
+[Disk health](#disk-health-and-what-it-deliberately-does-not-show).
+
+## Disk health, and what it deliberately does not show
+
+The storage view lists each physical drive with its model, firmware, bus, capacity and
+temperature, where the temperature is shown against the drive's own critical threshold:
+
+```
+╭Disks (2)──────────────────────────────────────────────────────────────────────────────╮
+│DEVICE      TYPE     MODEL                   FIRMWARE  BUS   CAPACITY    TEMP         │
+│nvme0n1     SSD      INTEL HBRPEKNX0202A     G001      nvme  953.9 GiB    30.9°/80°    │
+│nvme1n1     SSD      INTEL HBRPEKNX0202AO    K4110430  nvme  54.5 GiB     41.8°        │
+╰──────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+**What you get for free.** The kernel publishes a surprising amount about a drive
+through world-readable sysfs, and syswatch reads all of it: `queue/rotational` (so SSD
+and HDD are distinguished rather than guessed), capacity, model, firmware, serial,
+NVMe controller state, and the temperature channels from `/sys/class/hwmon`. Each
+sensor is attributed to its own drive by canonicalising both the block device's and the
+hwmon device's symlinks to the same controller node, so two identical drives never
+show each other's temperature.
+
+**What it does not show, and why.** The numbers people usually want — wear percentage,
+media errors, power-on hours, data units written — are in the **NVMe SMART log page**,
+which is not a file. It is an NVMe admin command (`NVME_IOCTL_ADMIN_CMD`) issued
+through a raw ioctl on `/dev/nvme*`, and opening that device needs root. There is no
+sysfs file for it, and no crate in the dependency set exposes it.
+
+Getting it would mean one of three things, all of which cost more than they are worth
+for a dashboard:
+
+| Option | Why not |
+| --- | --- |
+| Shell out to `nvme smart-log` | Needs root or a setuid helper, and breaks the promise that syswatch never runs an external command |
+| Raw `ioctl` via `nix` | Adds `unsafe` code wrapping a 512-byte protocol buffer, and still needs root |
+| Link `libsmartctl` | Adds a C dependency and a build-time toolchain requirement |
+
+So the TUI stays unprivileged and dependency-free, and the full SMART log is one
+command away when you actually want it:
+
+```sh
+scripts/disk-health.sh              # every NVMe device
+sudo scripts/disk-health.sh         # needed if the device is not world readable
+scripts/disk-health.sh --json       # machine readable
+```
+
+It wraps `nvme-cli` (NVMe) or `smartctl` (SATA/SCSI) and reports percentage used,
+power-on hours, power cycles, media errors, error log entries, unsafe shutdowns,
+temperature and available spare. Install the tool first:
+
+```sh
+sudo xbps-install nvme-cli     # Void
+sudo pacman -S nvme-cli        # Arch
+sudo dnf install nvme-cli      # Fedora
+```
+
+The critical temperature that syswatch *does* show is the one number here that
+genuinely predicts a failure: it is the point at which the drive throttles or shuts
+itself down to protect the data. Wear percentage is a better long-run indicator, but
+it changes slowly and no display needs to refresh for it.
+
 ## Architecture
 
 ```
@@ -323,6 +392,7 @@ src/
 │   ├── memory.rs       /proc/meminfo plus sysinfo
 │   ├── processes.rs    the process table, search, sort, signals
 │   ├── storage.rs      /proc/mounts plus statvfs, classification
+│   ├── disks.rs        /sys/block inventory plus hwmon temperatures
 │   ├── network.rs      /proc/net/dev deltas and rates
 │   └── system.rs       /etc/os-release, uptime, load, sensors
 └── ui/                 rendering; a pure function of the state
@@ -372,7 +442,7 @@ make smoke        # drive the TUI in a pseudo terminal and print the screen
 renders the screen back as text. It is the only test that exercises the full stack
 including crossterm and the collector thread.
 
-The test suite is 265 tests: unit tests next to the code they cover, plus
+The test suite is 298 tests: unit tests next to the code they cover, plus
 integration tests in `tests/` that drive the public API only.
 
 ```
@@ -395,6 +465,13 @@ worse than one that displays `N/A`.
 - **Temperatures need hwmon or `lm-sensors`.** Without them the sensor section says
   so rather than guessing. Package and core temperatures are reported separately when
   the kernel exposes them.
+- **No SMART wear data.** Percentage used, media errors and power-on hours are not in
+  sysfs; they need an NVMe admin ioctl that requires root. Use
+  `scripts/disk-health.sh`. This is deliberate, explained under
+  [Disk health](#disk-health-and-what-it-deliberately-does-not-show).
+- **The disk inventory is `/sys/block` only**, which lists whole disks and not
+  partitions, so a drive appears once rather than once per partition. Virtual devices
+  (loop, zram, device-mapper, md) are filtered out.
 - **Process CPU is relative to one core.** A multi-threaded process can exceed 100%
   on a single core. The table normalises by the logical core count, so the column
   reads as a share of the whole machine; a process pinned to four cores on an
