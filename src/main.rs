@@ -205,6 +205,11 @@ fn event_loop(
     let mut dirty = true;
     let mut frames: u64 = 0;
     let mut next_clock_tick = Instant::now() + CLOCK_TICK;
+    // The collector samples on a fixed cadence, so the next snapshot is due one
+    // interval from the last one. The poll below is bounded by that, so a freshly
+    // collected sample is claimed and drawn as soon as it lands instead of waiting
+    // for the input timeout to expire.
+    let mut next_sample_due = Instant::now() + app.config.interval();
 
     loop {
         // 1. Drain whatever the collector produced since the last iteration.
@@ -251,7 +256,15 @@ fn event_loop(
         if syswatch::terminal::termination_requested() {
             app.should_quit = true;
         }
-        match poll_events(app, MAX_BLOCK_INTERVAL) {
+        // Wait for whichever comes first: the next sample landing, the clock ticking,
+        // or a key press. Bounding the wait by the sample deadline is what keeps
+        // fresh data from sitting unclaimed in the channel.
+        let now = Instant::now();
+        let until_sample = next_sample_due.saturating_duration_since(now);
+        let until_clock = next_clock_tick.saturating_duration_since(now);
+        let timeout = until_sample.min(until_clock).min(MAX_BLOCK_INTERVAL);
+
+        match poll_events(app, timeout) {
             Ok(batch) => {
                 if batch.should_quit || app.should_quit {
                     break;
@@ -263,6 +276,12 @@ fn event_loop(
                 continue;
             }
             Err(err) => return Err(err.into()),
+        }
+
+        if dirty {
+            // Re-arm the sample deadline; the collector runs on its own cadence, so
+            // this tracks it rather than predicting it precisely.
+            next_sample_due = Instant::now() + app.config.interval();
         }
     }
     Ok(())
