@@ -25,3 +25,7 @@ Thumbs.db
 # Syswatch local state / logs
 *.log
 /syswatch.local.toml
+
+# Python bytecode from scripts/smoke.py
+__pycache__/
+*.pyc

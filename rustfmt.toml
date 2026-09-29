@@ -1,0 +1,5 @@
+# Formatting and linting are driven by the stable toolchain declared in
+# rust-toolchain.toml, with a nightly-only max_width that keeps lines readable.
+edition = "2024"
+max_width = 100
+use_field_init_shorthand = true
