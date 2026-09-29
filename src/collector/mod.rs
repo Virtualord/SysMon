@@ -169,7 +169,10 @@ impl Collector {
         let mut cpu_snapshot = self.cpu.sample(&mut self.system);
         let memory_snapshot = self.memory.sample(&mut self.system);
 
-        if self.slow_countdown == 0 {
+        // The slow cadence covers everything that does not change tick to tick: the
+        // mount table, the sensors, and the passwd-backed user names.
+        let slow_tick = self.slow_countdown == 0;
+        if slow_tick {
             self.slow_countdown = self.config.slow_refresh_every.max(1);
             self.cached_storage = self.storage.sample();
             self.cached_dynamic = self.system_info.dynamic_info(&mut self.components);
@@ -193,7 +196,7 @@ impl Collector {
         self.last_dynamic = self.cached_dynamic.clone();
 
         let processes = if self.config.collect_processes {
-            self.processes.sample(&mut self.system)
+            self.processes.sample(&mut self.system, slow_tick)
         } else {
             processes::ProcessList::default()
         };

@@ -308,23 +308,31 @@ pub struct ProcessCollector {
 impl ProcessCollector {
     /// Creates a collector, priming `system` so the first CPU values are meaningful.
     pub fn new(_config: &crate::collector::CollectorConfig) -> Self {
+        // `without_tasks()` matters a lot: `sysinfo` treats every *thread* as a
+        // process by default, so the default walks `/proc/<pid>/task/*/stat` for the
+        // whole system. On a busy host that is several times more work than listing
+        // the processes themselves, and the process table has no use for the extra
+        // rows.
         let refresh_kind = ProcessRefreshKind::nothing()
             .with_cpu()
             .with_memory()
             .with_exe(UpdateKind::OnlyIfNotSet)
             .with_cmd(UpdateKind::OnlyIfNotSet)
             .with_user(UpdateKind::OnlyIfNotSet)
-            .with_tasks();
+            .without_tasks();
         let users = Users::new_with_refreshed_list();
         // The uid syswatch runs as; used by the "my processes" filter.
         let current_uid = u32::from(nix::unistd::Uid::current());
-        Self {
+        let mut collector = Self {
             refresh_kind,
             users,
             user_names: HashMap::new(),
             current_uid,
             last_pids: Vec::new(),
-        }
+        };
+        // Populate the name map immediately so the first sample resolves users.
+        collector.refresh_user_names(true);
+        collector
     }
 
     /// The uid syswatch itself runs as.
@@ -333,7 +341,11 @@ impl ProcessCollector {
     }
 
     /// Refreshes and returns the process table.
-    pub fn sample(&mut self, system: &mut System) -> ProcessList {
+    ///
+    /// `refresh_users` is false on most ticks: the uid-to-name map is derived from
+    /// `/etc/passwd`, which does not change while syswatch is running, and re-reading
+    /// it every second is pure overhead. The caller passes true on the slow cadence.
+    pub fn sample(&mut self, system: &mut System, refresh_users: bool) -> ProcessList {
         system.refresh_processes_specifics(ProcessesToUpdate::All, true, self.refresh_kind);
 
         let current: Vec<Pid> = system.processes().keys().copied().collect();
@@ -344,7 +356,7 @@ impl ProcessCollector {
             .count();
         self.last_pids = current;
 
-        self.refresh_user_names();
+        self.refresh_user_names(refresh_users);
         let mut processes = Vec::with_capacity(system.processes().len());
         for (pid, process) in system.processes() {
             let uid = process.user_id().map(numeric_uid);
@@ -378,7 +390,13 @@ impl ProcessCollector {
     }
 
     /// Refreshes the uid to name mapping, keeping the cache bounded.
-    fn refresh_user_names(&mut self) {
+    ///
+    /// Skipped entirely on fast ticks; the map is filled once at construction so the
+    /// very first sample already resolves names.
+    fn refresh_user_names(&mut self, refresh: bool) {
+        if !refresh && !self.user_names.is_empty() {
+            return;
+        }
         self.users.refresh();
         if self.user_names.len() <= MAX_USERS {
             for user in self.users.list() {
@@ -541,7 +559,7 @@ mod tests {
         let config = crate::collector::CollectorConfig::default();
         let mut collector = ProcessCollector::new(&config);
         let mut system = System::new();
-        let list = collector.sample(&mut system);
+        let list = collector.sample(&mut system, true);
         assert!(
             list.processes
                 .iter()
@@ -554,10 +572,31 @@ mod tests {
         let config = crate::collector::CollectorConfig::default();
         let mut collector = ProcessCollector::new(&config);
         let mut system = System::new();
-        let first = collector.sample(&mut system);
+        let first = collector.sample(&mut system, true);
         assert_eq!(first.vanished, 0);
-        let second = collector.sample(&mut system);
+        let second = collector.sample(&mut system, true);
         assert!(second.vanished <= first.processes.len());
+    }
+
+    #[test]
+    fn user_names_resolve_on_the_first_sample_without_a_user_refresh() {
+        // The name map is populated at construction, so a fast tick that skips the
+        // passwd re-read still reports real user names rather than bare uids.
+        let config = crate::collector::CollectorConfig::default();
+        let mut collector = ProcessCollector::new(&config);
+        let mut system = System::new();
+        let list = collector.sample(&mut system, false);
+        let me = list
+            .processes
+            .iter()
+            .find(|p| p.pid == Pid::from_u32(std::process::id()));
+        if let Some(me) = me {
+            assert_ne!(
+                me.user, "?",
+                "the current process must resolve to a user name"
+            );
+            assert!(!me.user.is_empty());
+        }
     }
 
     #[test]
