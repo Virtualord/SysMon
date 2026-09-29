@@ -173,23 +173,23 @@ fn draw_status_bar(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             format!("{}/{} procs", app.process_rows(), app.total_processes()),
             theme.dim(),
         ));
-        let direction = if app.sort_descending { "desc" } else { "asc" };
+        let direction = if app.sort_descending() { "desc" } else { "asc" };
         spans.push(Span::styled(
-            format!("  sort {} {}", app.sort_key.label(), direction),
+            format!("  sort {} {}", app.sort_key().label(), direction),
             theme.dim(),
         ));
         spans.push(Span::styled(
-            format!("  filter {}", filter_label(app.filter)),
+            format!("  filter {}", filter_label(app.filter())),
             theme.dim(),
         ));
-        if !app.search.text.is_empty() {
-            let field = match app.search.field {
+        if !app.search().text.is_empty() {
+            let field = match app.search().field {
                 SearchField::Name => "name",
                 SearchField::Pid => "pid",
                 SearchField::All => "all",
             };
             spans.push(Span::styled(
-                format!("  /{field}:{} ", app.search.text),
+                format!("  /{field}:{} ", app.search().text),
                 theme.accent_style(),
             ));
         }
@@ -236,7 +236,7 @@ pub fn draw_search_prompt(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     };
     let block = Block::default();
     let inner = block.inner(prompt_area);
-    let field = match app.search.field {
+    let field = match app.search().field {
         SearchField::Name => "name",
         SearchField::Pid => "pid",
         SearchField::All => "all",
@@ -246,7 +246,7 @@ pub fn draw_search_prompt(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
             " search ",
             Style::default().fg(theme.selection_text).bg(theme.accent),
         ),
-        Span::styled(format!("[{field}] > {}", app.search.text), theme.text()),
+        Span::styled(format!("[{field}] > {}", app.search().text), theme.text()),
         Span::styled("█", theme.accent_style()),
         Span::styled(
             "  (Enter accept · Esc cancel · Tab accept & close)",

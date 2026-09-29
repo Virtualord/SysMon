@@ -82,7 +82,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let mut state = TableState::default().with_selected(Some(selected));
     frame.render_stateful_widget(table, table_area, &mut state);
 
-    frame.render_widget(footer(app, &visible, snapshot, theme), footer_area);
+    frame.render_widget(footer(app, visible, snapshot, theme), footer_area);
 }
 
 /// Builds the process row.
@@ -132,9 +132,9 @@ fn state_color(state: u8, theme: &Theme) -> ratatui::style::Color {
 /// The column header, with the active sort column marked.
 fn header_row<'a>(app: &App, theme: &Theme) -> Row<'a> {
     let marker = |key: crate::collector::processes::SortKey, label: &'a str| {
-        let active = app.sort_key == key;
+        let active = app.sort_key() == key;
         let arrow = if active {
-            if app.sort_descending { "▼" } else { "▲" }
+            if app.sort_descending() { "▼" } else { "▲" }
         } else {
             " "
         };
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn search_filters_the_table() {
         let mut app = app_with_processes();
-        app.search.text = "bash".to_string();
+        app.set_search_text("bash");
         let output = render(&mut app, 140, 40);
         assert!(output.contains("bash"), "got: {output}");
         assert!(

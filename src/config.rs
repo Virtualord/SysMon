@@ -221,6 +221,8 @@ pub struct Config {
     pub network_interfaces: Vec<String>,
     /// Show temperature rows when the kernel exposes sensors.
     pub show_temperatures: bool,
+    /// Show the physical disk inventory and its temperatures on the storage view.
+    pub show_disk_health: bool,
     /// Include kernel pseudo filesystems in the storage view.
     pub show_pseudo_filesystems: bool,
     /// Show the load average in the header.
@@ -239,6 +241,7 @@ impl Default for Config {
             process_filter: ProcessFilterSetting::All,
             network_interfaces: Vec::new(),
             show_temperatures: true,
+            show_disk_health: true,
             show_pseudo_filesystems: false,
             show_load_average: true,
         }
@@ -551,6 +554,7 @@ mod tests {
             process_filter: ProcessFilterSetting::User,
             network_interfaces: vec!["eth0".to_string()],
             show_temperatures: false,
+            show_disk_health: false,
             show_pseudo_filesystems: true,
             show_load_average: false,
         };

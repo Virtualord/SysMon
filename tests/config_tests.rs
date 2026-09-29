@@ -205,6 +205,7 @@ fn saving_and_loading_preserves_every_field() {
         process_filter: ProcessFilterSetting::Tasks,
         network_interfaces: vec!["eth0".to_string()],
         show_temperatures: false,
+        show_disk_health: false,
         show_pseudo_filesystems: true,
         show_load_average: false,
     };

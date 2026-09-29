@@ -7,7 +7,7 @@
 use std::time::{Duration, SystemTime};
 
 use crate::collector::Snapshot;
-use crate::collector::processes::{self, ProcessInfo, SearchQuery, SortKey};
+use crate::collector::processes::{self, ProcessInfo, SearchField, SearchQuery, SortKey};
 use crate::config::Config;
 use crate::history::Series;
 
@@ -228,6 +228,19 @@ pub enum Action {
     None,
 }
 
+/// The inputs the cached process projection was built from.
+///
+/// Any difference invalidates the cache. `sequence` alone changes on every refresh,
+/// which is what keeps the rows in step with the metrics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProjectionKey {
+    sequence: u64,
+    filter: processes::ProcessFilter,
+    search: SearchQuery,
+    sort_key: SortKey,
+    sort_descending: bool,
+}
+
 /// Central application state.
 pub struct App {
     /// The active configuration.
@@ -243,13 +256,23 @@ pub struct App {
     /// Whether the search prompt is currently accepting input.
     pub search_active: bool,
     /// The process search query.
-    pub search: SearchQuery,
+    ///
+    /// Private on purpose: the visible rows are projected from this field, so changing
+    /// it has to go through [`App::set_search`] to keep the table consistent. Use
+    /// [`App::search`] to read it.
+    search: SearchQuery,
     /// Which process filter is applied.
-    pub filter: processes::ProcessFilter,
+    ///
+    /// Private for the same reason as `search`; use [`App::filter`].
+    filter: processes::ProcessFilter,
     /// The column the process table is sorted by.
-    pub sort_key: SortKey,
+    ///
+    /// Private for the same reason as `search`; use [`App::sort_key`].
+    sort_key: SortKey,
     /// Whether the sort order is descending.
-    pub sort_descending: bool,
+    ///
+    /// Private for the same reason as `search`; use [`App::sort_descending`].
+    sort_descending: bool,
     /// Index of the selected row within the filtered process list.
     pub selected_process: usize,
     /// Number of visible rows in the process table, used for paging.
@@ -266,6 +289,13 @@ pub struct App {
     pub network_tx_history: Series,
     /// Transient message shown in the status bar.
     pub message: Option<StatusMessage>,
+    /// The filtered and sorted process rows shown by the table.
+    ///
+    /// Maintained by [`App::rebuild_projection`]; read through
+    /// [`App::visible_processes`].
+    projection: Vec<ProcessInfo>,
+    /// The inputs `projection` was built from, so a stale projection is detectable.
+    projection_key: ProjectionKey,
     /// Whether the application should keep running.
     pub should_quit: bool,
     /// Whether the last requested refresh has been served.
@@ -298,6 +328,8 @@ impl App {
             selected_process: 0,
             visible_rows: 1,
             message: None,
+            projection: Vec::new(),
+            projection_key: ProjectionKey::default(),
             should_quit: false,
             pending_refresh: false,
             color_enabled: true,
@@ -335,6 +367,9 @@ impl App {
 
         self.snapshot = Some(snapshot);
         self.visible_rows = 1;
+        // A new snapshot means a new process list, so the projection is rebuilt here
+        // rather than lazily; this is the only place the process data changes.
+        self.rebuild_projection();
         self.clamp_selection();
     }
 
@@ -352,13 +387,85 @@ impl App {
             .map_or(0, |snapshot| snapshot.processes.vanished)
     }
 
+    /// The active process search query.
+    pub fn search(&self) -> &SearchQuery {
+        &self.search
+    }
+
+    /// The active process filter.
+    pub fn filter(&self) -> processes::ProcessFilter {
+        self.filter
+    }
+
+    /// The column the process table is sorted by.
+    pub fn sort_key(&self) -> SortKey {
+        self.sort_key
+    }
+
+    /// Whether the sort order is descending.
+    pub fn sort_descending(&self) -> bool {
+        self.sort_descending
+    }
+
+    /// Replaces the search query and refreshes the projection.
+    pub fn set_search(&mut self, query: SearchQuery) {
+        self.search = query;
+        self.selected_process = 0;
+        self.rebuild_projection();
+    }
+
+    /// Sets the search text, keeping the current field, and refreshes the projection.
+    pub fn set_search_text(&mut self, text: impl Into<String>) {
+        self.search.text = text.into();
+        self.selected_process = 0;
+        self.rebuild_projection();
+    }
+
     /// The processes that pass the active search and filter, sorted for display.
     ///
-    /// The rows are cloned out of the snapshot so the result is an owned `Vec` that a
-    /// caller may keep while it mutates `self` (moving the selection, taking a fresh
-    /// snapshot). A monitor shows at most a few thousand processes, so the copy is far
-    /// cheaper than the borrow gymnastics of handing out references.
-    pub fn visible_processes(&self) -> Vec<ProcessInfo> {
+    /// Filtering and sorting means cloning and ordering every row, which on a machine
+    /// with a few thousand processes is the single most expensive thing the process
+    /// view does — and the UI asks for this list several times per frame. The rows are
+    /// therefore projected once per change by [`App::rebuild_projection`] and read
+    /// straight out of a field here.
+    pub fn visible_processes(&self) -> &[ProcessInfo] {
+        &self.projection
+    }
+
+    /// Recomputes the projection after one of its inputs changed.
+    ///
+    /// Every method that alters the snapshot, the search, the filter or the sort order
+    /// calls this, so [`App::visible_processes`] is a field read that cannot go stale.
+    /// `projection_is_current` exists so a new mutation site that forgets is caught by
+    /// a test rather than by a stale table.
+    fn rebuild_projection(&mut self) {
+        self.projection = self.build_visible_processes();
+        self.projection_key = self.current_projection_key();
+    }
+
+    /// Everything [`App::rebuild_projection`] depends on, recorded so a stale
+    /// projection is detectable.
+    fn current_projection_key(&self) -> ProjectionKey {
+        ProjectionKey {
+            sequence: self
+                .snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.sequence),
+            filter: self.filter,
+            search: self.search.clone(),
+            sort_key: self.sort_key,
+            sort_descending: self.sort_descending,
+        }
+    }
+
+    /// Whether the stored projection still matches the current inputs.
+    #[cfg(test)]
+    fn projection_is_current(&self) -> bool {
+        self.projection_key == self.current_projection_key()
+    }
+
+    /// The uncached implementation of [`App::visible_processes`].
+    fn build_visible_processes(&self) -> Vec<ProcessInfo> {
         let current_uid = u32::from(nix::unistd::Uid::current());
         let mut visible: Vec<ProcessInfo> = self
             .process_list()
@@ -377,11 +484,16 @@ impl App {
         visible
     }
 
+    /// The test-only reference implementation, kept so the cached path can be checked
+    /// against a straightforward recomputation.
+    #[cfg(test)]
+    fn build_visible_processes_uncached(&self) -> Vec<ProcessInfo> {
+        self.build_visible_processes()
+    }
+
     /// The process currently selected in the table, if any.
     pub fn selected_process_info(&self) -> Option<ProcessInfo> {
-        self.visible_processes()
-            .into_iter()
-            .nth(self.selected_process)
+        self.visible_processes().get(self.selected_process).cloned()
     }
 
     /// Keeps the selection inside the bounds of the current list.
@@ -421,10 +533,17 @@ impl App {
         self.message = Some(message);
     }
 
-    /// Clears an expired message. Called once per frame.
-    pub fn expire_message(&mut self) {
+    /// Clears an expired message, returning whether one was cleared.
+    ///
+    /// The event loop uses the return value to decide whether the frame it is about
+    /// to draw needs to happen at all: a message that has to disappear is a visual
+    /// change, and missing it would leave stale text on screen.
+    pub fn expire_message(&mut self) -> bool {
         if self.message.as_ref().is_some_and(StatusMessage::is_expired) {
             self.message = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -452,6 +571,34 @@ impl App {
             self.sort_descending = matches!(key, SortKey::Cpu | SortKey::Memory | SortKey::Name);
         }
         self.selected_process = 0;
+        self.rebuild_projection();
+    }
+
+    /// Reverses the sort order, keeping the selected row where possible.
+    pub fn toggle_sort_direction(&mut self) {
+        self.sort_descending = !self.sort_descending;
+        self.rebuild_projection();
+    }
+
+    /// Switches which field the search matches against.
+    pub fn set_search_field(&mut self, field: SearchField) {
+        self.search.field = field;
+        self.selected_process = 0;
+        self.rebuild_projection();
+    }
+
+    /// Removes the last character of the search query.
+    pub fn search_backspace(&mut self) {
+        self.search.text.pop();
+        self.selected_process = 0;
+        self.rebuild_projection();
+    }
+
+    /// Switches the active process filter.
+    pub fn set_filter(&mut self, filter: processes::ProcessFilter) {
+        self.filter = filter;
+        self.selected_process = 0;
+        self.rebuild_projection();
     }
 
     /// Clears the search query and deactivates the prompt.
@@ -459,6 +606,7 @@ impl App {
         self.search = SearchQuery::default();
         self.search_active = false;
         self.selected_process = 0;
+        self.rebuild_projection();
     }
 
     /// Handles a search prompt keystroke. Returns whether the key was consumed.
@@ -475,8 +623,7 @@ impl App {
                 true
             }
             Key::Backspace => {
-                self.search.text.pop();
-                self.selected_process = 0;
+                self.search_backspace();
                 true
             }
             Key::Tab => {
@@ -486,6 +633,9 @@ impl App {
             Key::Char(ch) => {
                 self.search.text.push(ch);
                 self.selected_process = 0;
+                // Rebuild on every keystroke: the result set is what the user is
+                // watching change as they type.
+                self.rebuild_projection();
                 true
             }
             _ => false,
@@ -503,6 +653,7 @@ impl App {
         self.search.text.clear();
         self.search.field = processes::SearchField::Name;
         self.selected_process = 0;
+        self.rebuild_projection();
     }
 
     /// Runs the confirmed termination of a process.
@@ -578,11 +729,7 @@ mod tests {
                 processes,
                 vanished: 0,
             },
-            storage: Vec::new(),
-            network: Default::default(),
-            system: Default::default(),
-            dynamic: Default::default(),
-            warnings: Vec::new(),
+            ..Snapshot::default()
         }
     }
 
@@ -660,7 +807,7 @@ mod tests {
     #[test]
     fn search_filters_by_name() {
         let mut app = app_with_processes(5);
-        app.search.text = "proc3".to_string();
+        app.set_search_text("proc3");
         let visible = app.visible_processes();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].pid.as_u32(), 4);
@@ -669,8 +816,8 @@ mod tests {
     #[test]
     fn search_by_pid_field_matches_exactly() {
         let mut app = app_with_processes(5);
-        app.search.text = "2".to_string();
-        app.search.field = processes::SearchField::Pid;
+        app.set_search_field(processes::SearchField::Pid);
+        app.set_search_text("2");
         assert_eq!(app.visible_processes().len(), 1);
     }
 
@@ -734,7 +881,7 @@ mod tests {
     #[test]
     fn escape_clears_the_search() {
         let mut app = app_with_processes(3);
-        app.search.text = "proc".to_string();
+        app.set_search_text("proc");
         assert!(app.handle_search_key(crate::events::Key::Esc));
         assert!(app.search.text.is_empty());
         assert!(!app.search_active);
@@ -772,6 +919,102 @@ mod tests {
             ..StatusMessage::info("x")
         };
         assert!(expired.is_expired());
+    }
+
+    #[test]
+    fn expiring_a_message_reports_that_it_happened() {
+        // The event loop uses the return value to decide whether to redraw; a silent
+        // clear would leave stale text on screen.
+        let mut app = App::new(Config::default());
+        app.notify(StatusMessage::info("hello"));
+        assert!(!app.expire_message(), "a fresh message must not be cleared");
+        app.notify(StatusMessage {
+            ttl: Duration::from_secs(0),
+            ..StatusMessage::info("bye")
+        });
+        assert!(
+            app.expire_message(),
+            "an expired message must report the clear"
+        );
+        assert!(!app.expire_message(), "clearing twice must be a no-op");
+    }
+
+    #[test]
+    fn the_projection_is_rebuilt_after_every_input_change() {
+        let mut app = app_with_processes(5);
+
+        // Every mutation that can change which rows are visible must refresh the
+        // projection; a stale table would show the wrong processes. In the fixture the
+        // first process also has the largest memory, so both the CPU and the memory
+        // sort start on PID 1.
+        app.set_sort(SortKey::Memory);
+        assert!(app.projection_is_current());
+        assert_eq!(
+            app.visible_processes()[0].pid.as_u32(),
+            1,
+            "largest memory first"
+        );
+
+        app.toggle_sort_direction();
+        assert!(app.projection_is_current());
+        assert_eq!(
+            app.visible_processes()[0].pid.as_u32(),
+            5,
+            "reversed: smallest memory first"
+        );
+
+        app.set_filter(processes::ProcessFilter::UserTasks);
+        assert!(app.projection_is_current());
+        assert!(app.visible_processes().iter().all(|p| p.cmd.is_some()));
+
+        app.set_search_field(SearchField::Pid);
+        assert!(app.projection_is_current());
+
+        app.search.text = "3".to_string();
+        app.rebuild_projection();
+        assert!(app.projection_is_current());
+        assert_eq!(app.visible_processes().len(), 1);
+
+        app.clear_search();
+        assert!(app.projection_is_current());
+        assert_eq!(app.visible_processes().len(), 5);
+    }
+
+    #[test]
+    fn the_projection_follows_a_new_snapshot() {
+        let mut app = app_with_processes(5);
+        assert_eq!(app.visible_processes().len(), 5);
+        app.update(snapshot_with_processes(2));
+        assert!(app.projection_is_current());
+        assert_eq!(app.visible_processes().len(), 2);
+    }
+
+    #[test]
+    fn search_typing_refreshes_the_projection() {
+        let mut app = app_with_processes(5);
+        app.start_search();
+        assert!(app.projection_is_current());
+        for ch in "proc3".chars() {
+            app.handle_search_key(crate::events::Key::Char(ch));
+            assert!(
+                app.projection_is_current(),
+                "typing {ch:?} left a stale projection"
+            );
+        }
+        assert_eq!(app.visible_processes().len(), 1);
+    }
+
+    #[test]
+    fn the_projection_matches_an_uncached_recomputation() {
+        let mut app = app_with_processes(7);
+        app.set_search_text("proc");
+        app.rebuild_projection();
+        app.set_sort(SortKey::Pid);
+        assert!(app.projection_is_current());
+        assert_eq!(
+            app.visible_processes(),
+            app.build_visible_processes_uncached()
+        );
     }
 
     #[test]

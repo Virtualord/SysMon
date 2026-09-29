@@ -15,8 +15,15 @@ use syswatch::events::{Monitor, poll_events};
 use syswatch::terminal::TerminalGuard;
 use syswatch::ui::draw;
 
-/// Slowest redraw rate, so an idle machine does not spin the CPU.
-const MAX_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+/// How long the event loop may block waiting for input before looping again.
+///
+/// This is not a frame rate: it is the longest the loop will sit still when nothing
+/// is happening. The header clock ticks once a second, so a one second ceiling is
+/// enough to keep the clock honest while an idle syswatch uses no measurable CPU.
+const MAX_BLOCK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// One second: the resolution at which the header clock is displayed.
+const CLOCK_TICK: Duration = Duration::from_secs(1);
 
 /// Command line interface.
 #[derive(Debug, Parser, Default)]
@@ -175,22 +182,46 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     result
 }
 
-/// The main loop: draw, then wait for input, repeat.
+/// The main loop: redraw only when something changed, otherwise block on input.
+///
+/// The important property is that a frame is *not* a timer. Rendering is the
+/// expensive half of a TUI — building every widget and diffing the buffer — and
+/// drawing the same dashboard nine times a second to change nothing is pure waste.
+/// A frame is produced when, and only when, one of these is true:
+///
+/// * a new snapshot arrived,
+/// * the user pressed a key,
+/// * the terminal was resized,
+/// * a status message expired and has to disappear,
+/// * the header clock ticked over to the next second.
+///
+/// Otherwise the loop blocks in `poll` until one of those happens, which costs
+/// nothing measurable.
 fn event_loop(
     guard: &mut TerminalGuard,
     app: &mut App,
     monitor: &mut Monitor,
 ) -> anyhow::Result<()> {
-    let mut last_frame = Instant::now();
+    let mut dirty = true;
     let mut frames: u64 = 0;
+    let mut next_clock_tick = Instant::now() + CLOCK_TICK;
+    // The collector samples on a fixed cadence, so the next snapshot is due one
+    // interval from the last one. The poll below is bounded by that, so a freshly
+    // collected sample is claimed and drawn as soon as it lands instead of waiting
+    // for the input timeout to expire.
+    let mut next_sample_due = Instant::now() + app.config.interval();
 
     loop {
         // 1. Drain whatever the collector produced since the last iteration.
         for message in monitor.drain() {
             match message {
-                syswatch::events::MonitorMessage::Snapshot(snapshot) => app.update(*snapshot),
+                syswatch::events::MonitorMessage::Snapshot(snapshot) => {
+                    app.update(*snapshot);
+                    dirty = true;
+                }
                 syswatch::events::MonitorMessage::Failed(reason) => {
                     app.notify(syswatch::app::StatusMessage::error(reason));
+                    dirty = true;
                 }
             }
         }
@@ -199,40 +230,58 @@ fn event_loop(
             app.pending_refresh = false;
         }
 
-        // 2. Render. Ratatui only emits the cells that changed, so a redraw at 10 Hz
-        //    does not flicker.
-        let terminal = guard.terminal()?;
-        terminal.draw(|frame| draw(frame, app))?;
-        app.expire_message();
-        tracing::trace!("frame drawn");
-
-        // 3. Cap the frame rate and wait for input.
-        let elapsed = last_frame.elapsed();
-        if elapsed < MAX_FRAME_INTERVAL {
-            std::thread::sleep(MAX_FRAME_INTERVAL - elapsed);
-        }
-        last_frame = Instant::now();
-        frames += 1;
-
-        if frames.is_multiple_of(600) {
-            tracing::debug!("rendered {frames} frames");
+        // 2. An expiring status message has to be cleared by a redraw.
+        if app.expire_message() {
+            dirty = true;
         }
 
-        // 4. Handle input, unless a termination signal already arrived.
+        // 3. The header clock only needs a frame when the displayed second changes.
+        if Instant::now() >= next_clock_tick {
+            next_clock_tick = Instant::now() + CLOCK_TICK;
+            dirty = true;
+        }
+
+        // 4. Render, but only if something actually changed.
+        if dirty {
+            let terminal = guard.terminal()?;
+            terminal.draw(|frame| draw(frame, app))?;
+            dirty = false;
+            frames += 1;
+            if frames.is_multiple_of(600) {
+                tracing::debug!("rendered {frames} frames");
+            }
+        }
+
+        // 5. Block until there is a reason to draw again.
         if syswatch::terminal::termination_requested() {
             app.should_quit = true;
         }
-        match poll_events(app) {
+        // Wait for whichever comes first: the next sample landing, the clock ticking,
+        // or a key press. Bounding the wait by the sample deadline is what keeps
+        // fresh data from sitting unclaimed in the channel.
+        let now = Instant::now();
+        let until_sample = next_sample_due.saturating_duration_since(now);
+        let until_clock = next_clock_tick.saturating_duration_since(now);
+        let timeout = until_sample.min(until_clock).min(MAX_BLOCK_INTERVAL);
+
+        match poll_events(app, timeout) {
             Ok(batch) => {
                 if batch.should_quit || app.should_quit {
                     break;
                 }
+                dirty |= batch.key_pressed || batch.resized;
             }
             Err(err) if err.kind() == ErrorKind::Interrupted => {
                 // A signal interrupted the poll; loop around and re-check the flag.
                 continue;
             }
             Err(err) => return Err(err.into()),
+        }
+
+        if dirty {
+            // Re-arm the sample deadline; the collector runs on its own cadence, so
+            // this tracks it rather than predicting it precisely.
+            next_sample_due = Instant::now() + app.config.interval();
         }
     }
     Ok(())
