@@ -1,0 +1,27 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo / Rust tooling
+# NOTE: Cargo.lock is intentionally committed for reproducible builds of the
+# application binary. Only uncomment if a library target is published to a registry.
+# /Cargo.lock
+
+# Local environment files
+.env
+.env.*
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Syswatch local state / logs
+*.log
+/syswatch.local.toml
