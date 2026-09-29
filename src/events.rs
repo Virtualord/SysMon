@@ -30,6 +30,14 @@ const SNAPSHOT_CHANNEL_CAPACITY: usize = 4;
 /// given. Callers that care about CPU usage pass their own deadline instead.
 const DEFAULT_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How long [`poll_events`] keeps draining after the first event arrives.
+///
+/// Long enough to coalesce whatever the terminal already buffered into one repaint,
+/// short enough that a single key press still feels immediate. Terminal key repeat
+/// starts around 25 ms, so this deliberately sits below that: a held arrow key should
+/// produce one frame per repeat, not one frame at the end of the burst.
+const INPUT_BURST_WINDOW: Duration = Duration::from_millis(8);
+
 /// Number of frames the "force refresh" key advances the tick without new data.
 const REFRESH_DEADLINE_FRAMES: u8 = 20;
 
@@ -298,56 +306,78 @@ pub struct Batch {
 
 /// Waits up to `timeout` for events and folds them into the application state.
 ///
-/// The timeout is the whole budget for the call, not a per-event one: the loop below
-/// returns as soon as the deadline passes, so an idle application spends no CPU
-/// spinning on the terminal.
+/// The shape of this function *is* the input latency. It is tempting to keep polling
+/// for the whole timeout so that a burst of key repeats is handled in one pass, but
+/// that delays the repaint until the timeout expires — pressing `Tab` would take a
+/// full second to switch dashboards even though the state changed immediately.
+///
+/// So the wait and the work are separated:
+///
+/// 1. Block in `poll` until the *first* event arrives or the timeout passes. A
+///    timeout means nothing happened, so there is nothing to draw.
+/// 2. Process that event.
+/// 3. Drain whatever else is already queued, for at most [`INPUT_BURST_WINDOW`].
+///
+/// Step 3 coalesces events the terminal delivered in the same read into a single
+/// repaint, so holding a key or pasting does not queue a frame per character, while
+/// step 2 keeps a single key press responsive.
 pub fn poll_events(app: &mut App, timeout: Duration) -> io::Result<Batch> {
     let mut batch = Batch::default();
-    let deadline = Instant::now() + timeout.max(DEFAULT_INPUT_POLL_INTERVAL);
 
+    // Step 1: nothing to do means no redraw is needed.
+    if !event::poll(timeout.max(DEFAULT_INPUT_POLL_INTERVAL))? {
+        return Ok(batch);
+    }
+
+    // Step 2 and 3: handle the first event, then whatever is already buffered.
+    let burst_deadline = Instant::now() + INPUT_BURST_WINDOW;
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
+        let event = event::read()?;
+        let quit = handle_event(app, &mut batch, event)?;
+        if quit {
+            batch.should_quit = true;
+            return Ok(batch);
         }
-        if !event::poll(remaining)? {
+
+        let remaining = burst_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || !event::poll(remaining)? {
             break;
-        }
-        match event::read()? {
-            CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                let key = Key::from_crossterm(key);
-                batch.key_pressed = true;
-                let action = handle_key(app, key);
-                apply(app, action);
-                tracing::debug!(?action, ?app.dialog, should_quit = app.should_quit, "action applied");
-                if app.should_quit {
-                    batch.should_quit = true;
-                    break;
-                }
-                // A modal or the search prompt owns the keyboard; go back to the
-                // dashboard immediately instead of consuming this time slice on more
-                // input, so the overlay appears without a visible delay.
-                if app.dialog.is_some() || app.search_owns_input() {
-                    break;
-                }
-            }
-            CrosstermEvent::Resize(_, _) => batch.resized = true,
-            CrosstermEvent::Mouse(mouse) => {
-                if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                    apply(app, Action::SelectPrevious);
-                    batch.key_pressed = true;
-                } else if matches!(mouse.kind, MouseEventKind::ScrollDown) {
-                    apply(app, Action::SelectNext);
-                    batch.key_pressed = true;
-                }
-            }
-            // Focus changes, pasted text and any event kind this crossterm version
-            // adds later need no action, but must be matched to keep the match
-            // exhaustive.
-            _ => {}
         }
     }
     Ok(batch)
+}
+
+/// Folds one terminal event into the application state. Returns whether to stop.
+fn handle_event(app: &mut App, batch: &mut Batch, event: CrosstermEvent) -> io::Result<bool> {
+    match event {
+        CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+            let key = Key::from_crossterm(key);
+            batch.key_pressed = true;
+            let action = handle_key(app, key);
+            apply(app, action);
+            tracing::debug!(?action, ?app.dialog, should_quit = app.should_quit, "action applied");
+            // A modal or the search prompt owns the keyboard: stop immediately so its
+            // overlay is drawn before any further input is consumed.
+            Ok(app.should_quit || app.dialog.is_some() || app.search_owns_input())
+        }
+        CrosstermEvent::Resize(_, _) => {
+            batch.resized = true;
+            Ok(false)
+        }
+        CrosstermEvent::Mouse(mouse) => {
+            if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                apply(app, Action::SelectPrevious);
+                batch.key_pressed = true;
+            } else if matches!(mouse.kind, MouseEventKind::ScrollDown) {
+                apply(app, Action::SelectNext);
+                batch.key_pressed = true;
+            }
+            Ok(app.should_quit)
+        }
+        // Focus changes, pasted text and any event kind this crossterm version adds
+        // later need no action, but must be matched to keep the match exhaustive.
+        _ => Ok(false),
+    }
 }
 
 /// Routes a key press, mutating the search buffer when the prompt is active.
