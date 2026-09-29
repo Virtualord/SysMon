@@ -53,6 +53,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     );
     const HINT: &str = "↑↓ move · Enter details · k kill · c/m/p/n sort · f filter · / search";
     let block = widgets::panel_with_hint(&title, HINT, theme, focused);
+    // Fixed widths for everything but the name, so a long command name never pushes
+    // the numbers out of view. Totals to roughly 60 columns.
     let table = Table::new(
         visible
             .iter()
@@ -62,8 +64,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
             Constraint::Min(12),
             Constraint::Length(7),
             Constraint::Length(9),
-            Constraint::Length(9),
-            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Length(1),
         ],
     )
     .header(header_row(app, theme))
@@ -97,14 +99,17 @@ fn row<'a>(process: &ProcessInfo, cores: usize, snapshot: &Snapshot, theme: &The
     let cpu_style = Style::default().fg(theme.usage_color(cpu));
     let mem_style = Style::default().fg(theme.usage_color(memory_percent));
 
+    let state = process.state.chars().next().unwrap_or('?').to_string();
     Row::new(vec![
         Cell::from(process.pid.as_u32().to_string()),
         Cell::from(Span::raw(process.name.clone())),
         Cell::from(Span::styled(format::percent(cpu), cpu_style)),
         Cell::from(Span::styled(format::bytes(process.memory), mem_style)),
-        Cell::from(process.user.clone()),
+        // A user name longer than the column is cut rather than allowed to push the
+        // state column off the edge.
+        Cell::from(Span::raw(format::truncate(&process.user, 8))),
         Cell::from(Span::styled(
-            process.state.chars().next().unwrap_or('?').to_string(),
+            state,
             Style::default().fg(state_color(
                 process.state.as_bytes().first().copied().unwrap_or(b'?'),
                 theme,
@@ -297,6 +302,51 @@ mod tests {
         let mut app = app_with_processes();
         let output = render(&mut app, 160, 40);
         assert!(output.contains("exited"), "got: {output}");
+    }
+
+    #[test]
+    fn the_table_fits_a_70_column_terminal() {
+        // The documented minimum is 40, but the process table has the most columns;
+        // at 70 every one of them must still be readable.
+        let mut app = app_with_processes();
+        let output = render(&mut app, 70, 30);
+        for header in ["PID", "NAME", "CPU%", "MEMORY", "USER", "S"] {
+            assert!(
+                output.contains(header),
+                "header {header:?} was cut: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_user_name_does_not_push_the_state_off_the_row() {
+        let mut app = app_with_processes();
+        let mut snapshot = snapshot_with_processes();
+        for process in &mut snapshot.processes.processes {
+            process.user = "a-very-long-user-name-that-overflows".to_string();
+        }
+        app.update(snapshot);
+        let output = render(&mut app, 120, 30);
+        // Only lines inside the process panel count. A table row begins with the
+        // panel border and must end with the closing border, because the state column
+        // is the last one and cannot be pushed off the edge.
+        let mut rows = 0usize;
+        for line in output.lines() {
+            if !line.starts_with('│') {
+                continue;
+            }
+            let trimmed = line.trim_start_matches(['│', ' ', '▶']);
+            let looks_like_a_row = trimmed
+                .split_whitespace()
+                .next()
+                .is_some_and(|first| first.parse::<u32>().is_ok());
+            if !looks_like_a_row {
+                continue;
+            }
+            rows += 1;
+            assert!(line.trim_end().ends_with('│'), "row was cut: {line}");
+        }
+        assert_eq!(rows, 3, "all three processes must be visible: {output}");
     }
 
     #[test]
