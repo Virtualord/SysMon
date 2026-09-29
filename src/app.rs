@@ -729,11 +729,7 @@ mod tests {
                 processes,
                 vanished: 0,
             },
-            storage: Vec::new(),
-            network: Default::default(),
-            system: Default::default(),
-            dynamic: Default::default(),
-            warnings: Vec::new(),
+            ..Snapshot::default()
         }
     }
 

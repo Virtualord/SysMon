@@ -42,6 +42,14 @@ network_interfaces = []
 # hwmon devices or without lm-sensors show N/A; set to false to hide the section.
 show_temperatures = true
 
+# Show the physical disk inventory at the top of the storage view: model, firmware,
+# bus, capacity and the temperature the kernel reports for each drive.
+#
+# Only sysfs data is shown, so this needs no root and no extra tools. The NVMe wear
+# percentage and media error count are not in sysfs; run scripts/disk-health.sh when
+# you want those.
+show_disk_health = true
+
 # Include kernel pseudo filesystems (tmpfs, proc, cgroup, ...) in the storage view.
 # Off by default because they are not real disks and their "full" state is normal.
 show_pseudo_filesystems = false

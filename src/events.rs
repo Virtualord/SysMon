@@ -158,6 +158,7 @@ impl Monitor {
             show_pseudo_filesystems: config.show_pseudo_filesystems,
             network_interfaces: config.network_interfaces.clone(),
             collect_processes: true,
+            collect_disks: config.show_disk_health,
         };
         let (sender, receiver) = sync_channel(SNAPSHOT_CHANNEL_CAPACITY);
         let refresh = Arc::new(AtomicU64::new(0));
