@@ -33,16 +33,19 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let title = format!("Filesystems ({})", filesystems.len());
     const HINT: &str = "physical disks first · pseudo and network mounts are marked";
     let block = widgets::panel_with_hint(&title, HINT, theme, focused);
+    // The widths are chosen so the whole table fits in 120 columns, which is the
+    // narrowest terminal where the used-bar is still readable. Anything wider than
+    // that gives the surplus to the mount point, which is the column that benefits.
     let table = Table::new(
         filesystems.iter().map(|fs| row(fs, theme)),
         [
-            Constraint::Min(16),
-            Constraint::Min(10),
-            Constraint::Length(8),
+            Constraint::Min(12),
+            Constraint::Length(18),
+            Constraint::Length(6),
             Constraint::Length(9),
             Constraint::Length(9),
+            Constraint::Length(16),
             Constraint::Length(9),
-            Constraint::Length(11),
         ],
     )
     .header(
@@ -84,10 +87,11 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 /// Builds a filesystem row, including a text bar for the used percentage.
 fn row<'a>(filesystem: &FilesystemInfo, theme: &Theme) -> Row<'a> {
     let percent = filesystem.used_percent();
-    let bar_width = 10usize;
-    let filled = ((percent / 100.0) * bar_width as f64).round() as usize;
-    let filled = filled.min(bar_width);
-    let bar: String = "▇".repeat(filled) + &" ".repeat(bar_width - filled);
+    // Five blocks plus the percentage: 16 columns including the separating space.
+    const BAR_WIDTH: usize = 5;
+    let filled = ((percent / 100.0) * BAR_WIDTH as f64).round() as usize;
+    let filled = filled.min(BAR_WIDTH);
+    let bar: String = "▇".repeat(filled) + &"·".repeat(BAR_WIDTH - filled);
 
     let name_style = if filesystem.read_only {
         Style::default()
@@ -102,18 +106,18 @@ fn row<'a>(filesystem: &FilesystemInfo, theme: &Theme) -> Row<'a> {
             filesystem.mount_point.display().to_string(),
             name_style,
         )),
-        Cell::from(Span::raw(format::truncate_middle(&filesystem.name, 24))),
-        Cell::from(filesystem.file_system.clone()),
+        Cell::from(Span::raw(format::truncate_middle(&filesystem.name, 17))),
+        Cell::from(Span::raw(format::truncate(&filesystem.file_system, 5))),
         Cell::from(Span::styled(
             filesystem.kind.label().to_string(),
             Style::default().fg(kind_color(filesystem.kind, theme)),
         )),
-        Cell::from(format::bytes(filesystem.total)),
+        Cell::from(Span::raw(format::bytes(filesystem.total))),
         Cell::from(Span::styled(
-            format!("{bar} {:>3.0}%", percent),
+            format!("{bar} {percent:>3.0}%"),
             Style::default().fg(theme.usage_color(percent)),
         )),
-        Cell::from(format::bytes(filesystem.available)),
+        Cell::from(Span::raw(format::bytes(filesystem.available))),
     ])
 }
 
@@ -192,6 +196,37 @@ mod tests {
     }
 
     #[test]
+    fn the_whole_table_fits_a_120_column_terminal() {
+        // Every column must be readable at the documented minimum width; a truncated
+        // percentage is worse than a narrower mount column.
+        let mut app = app_with_filesystems();
+        let output = render(&mut app, 120, 40);
+        for header in ["TYPE", "KIND", "TOTAL", "USED", "AVAILABLE"] {
+            assert!(
+                output.contains(header),
+                "header {header:?} was cut: {output}"
+            );
+        }
+        assert!(
+            output.contains("AVAIL"),
+            "the header must not be cut: {output}"
+        );
+        assert!(
+            output.contains("50%"),
+            "the used percentage must be readable: {output}"
+        );
+        // 500 GiB and 1 TiB in the fixture, formatted by the shared byte helper.
+        assert!(
+            output.contains("500.0 GiB"),
+            "the total must be readable: {output}"
+        );
+        assert!(
+            output.contains("1.0 TiB"),
+            "the total must be readable: {output}"
+        );
+    }
+
+    #[test]
     fn shows_the_filesystem_kind() {
         let mut app = app_with_filesystems();
         app.config.show_pseudo_filesystems = true;
@@ -213,5 +248,51 @@ mod tests {
     fn narrow_terminal_does_not_panic() {
         let mut app = app_with_filesystems();
         let _ = render(&mut app, 45, 14);
+    }
+
+    #[test]
+    fn long_device_names_are_truncated_in_the_middle() {
+        // /dev/mapper/cryptroot is a real device name; the column must not push the
+        // percentages off the right edge.
+        let mut app = App::new(Config::default());
+        app.view = crate::app::View::Storage;
+        app.update(Snapshot {
+            storage: vec![filesystem(
+                "/dev/mapper/cryptroot-very-long-name",
+                "/",
+                FilesystemKind::Virtual,
+                500 * 1024 * 1024 * 1024,
+            )],
+            ..Snapshot::default()
+        });
+        let output = render(&mut app, 120, 40);
+        assert!(
+            output.contains("50%"),
+            "the percentage must survive: {output}"
+        );
+        assert!(
+            !output.contains("very-long-name"),
+            "the name must be shortened: {output}"
+        );
+    }
+
+    #[test]
+    fn read_only_mounts_are_marked() {
+        let mut app = App::new(Config::default());
+        app.view = crate::app::View::Storage;
+        let mut read_only = filesystem(
+            "/dev/sr0",
+            "/mnt/cdrom",
+            FilesystemKind::Physical,
+            700 * 1024 * 1024,
+        );
+        read_only.read_only = true;
+        app.update(Snapshot {
+            storage: vec![read_only],
+            ..Snapshot::default()
+        });
+        // The row must still render; the italic style is what distinguishes it.
+        let output = render(&mut app, 120, 40);
+        assert!(output.contains("/mnt/cdrom"), "got: {output}");
     }
 }
