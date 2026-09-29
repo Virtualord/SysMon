@@ -6,6 +6,7 @@
 //! concurrent mutation.
 
 pub mod cpu;
+pub mod disks;
 pub mod memory;
 pub mod network;
 pub mod processes;
@@ -17,6 +18,7 @@ use std::time::{Duration, Instant};
 use sysinfo::{Components, System};
 
 use self::cpu::CpuCollector;
+use self::disks::DiskCollector;
 use self::memory::MemoryCollector;
 use self::processes::ProcessCollector;
 use self::storage::StorageCollector;
@@ -39,6 +41,8 @@ pub struct Snapshot {
     pub processes: processes::ProcessList,
     /// Mounted filesystems.
     pub storage: Vec<storage::FilesystemInfo>,
+    /// Physical disks and the health the kernel publishes about them.
+    pub disks: Vec<disks::DiskDevice>,
     /// Network interface statistics.
     pub network: network::NetworkSnapshot,
     /// Static system information.
@@ -64,6 +68,11 @@ impl Snapshot {
     pub fn has_network(&self) -> bool {
         !self.network.interfaces.is_empty()
     }
+
+    /// Whether any physical disk was collected.
+    pub fn has_disks(&self) -> bool {
+        !self.disks.is_empty()
+    }
 }
 
 /// Tuning knobs for the monitoring thread.
@@ -80,6 +89,8 @@ pub struct CollectorConfig {
     pub network_interfaces: Vec<String>,
     /// Whether to collect the process table.
     pub collect_processes: bool,
+    /// Whether to collect the physical disk inventory.
+    pub collect_disks: bool,
 }
 
 impl Default for CollectorConfig {
@@ -90,6 +101,7 @@ impl Default for CollectorConfig {
             show_pseudo_filesystems: false,
             network_interfaces: Vec::new(),
             collect_processes: true,
+            collect_disks: true,
         }
     }
 }
@@ -102,6 +114,7 @@ pub struct Collector {
     memory: MemoryCollector,
     processes: ProcessCollector,
     storage: StorageCollector,
+    disks: DiskCollector,
     network: network::NetworkCollector,
     system_info: SystemCollector,
     config: CollectorConfig,
@@ -109,6 +122,7 @@ pub struct Collector {
     last_sample: Option<Instant>,
     cached_system: SystemInfo,
     cached_storage: Vec<storage::FilesystemInfo>,
+    cached_disks: Vec<disks::DiskDevice>,
     cached_dynamic: DynamicInfo,
     slow_countdown: u32,
     last_dynamic: DynamicInfo,
@@ -129,6 +143,7 @@ impl Collector {
         let memory = MemoryCollector::default();
         let processes = ProcessCollector::new(&config);
         let storage = StorageCollector::new(config.show_pseudo_filesystems);
+        let disks = DiskCollector::default();
         let network = network::NetworkCollector::new(config.network_interfaces.clone());
 
         Self {
@@ -138,6 +153,7 @@ impl Collector {
             memory,
             processes,
             storage,
+            disks,
             network,
             system_info: system_info_collector,
             config,
@@ -145,6 +161,7 @@ impl Collector {
             last_sample: None,
             cached_system: static_info,
             cached_storage: Vec::new(),
+            cached_disks: Vec::new(),
             cached_dynamic: DynamicInfo::default(),
             slow_countdown: 1,
             last_dynamic: DynamicInfo::default(),
@@ -175,6 +192,9 @@ impl Collector {
         if slow_tick {
             self.slow_countdown = self.config.slow_refresh_every.max(1);
             self.cached_storage = self.storage.sample();
+            if self.config.collect_disks {
+                self.cached_disks = self.disks.sample();
+            }
             self.cached_dynamic = self.system_info.dynamic_info(&mut self.components);
             self.cached_system = self.system_info.static_info(&self.system);
             if self.cached_dynamic.temperatures.is_empty() {
@@ -210,6 +230,7 @@ impl Collector {
             memory: memory_snapshot,
             processes,
             storage: self.cached_storage.clone(),
+            disks: self.cached_disks.clone(),
             network: network_snapshot,
             system: self.cached_system.clone(),
             dynamic: self.last_dynamic.clone(),
