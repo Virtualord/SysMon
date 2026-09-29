@@ -41,13 +41,14 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .iter()
             .map(|interface| row(interface, theme)),
         [
-            Constraint::Min(10),
+            Constraint::Min(8),
             Constraint::Length(6),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(8),
+            Constraint::Length(11),
+            Constraint::Length(11),
+            Constraint::Length(11),
+            Constraint::Length(11),
+            // 17 columns for a full `aa:bb:cc:dd:ee:ff` address.
+            Constraint::Length(17),
         ],
     )
     .header(
@@ -104,6 +105,7 @@ fn row<'a>(interface: &InterfaceStats, theme: &Theme) -> Row<'a> {
 
     Row::new(vec![
         Cell::from(Span::raw(interface.name.clone())),
+        // "loop" is four columns and must not be cut to three.
         Cell::from(state),
         Cell::from(Span::styled(
             format::rate(interface.receive_rate),
@@ -255,6 +257,24 @@ mod tests {
             "rates missing: {output}"
         );
         assert!(output.contains("RX TOTAL"), "totals missing: {output}");
+    }
+
+    #[test]
+    fn the_whole_table_fits_a_120_column_terminal() {
+        // A rate or a total cut in half is worse than a narrow MAC column, so the
+        // widths are pinned to the documented minimum width.
+        let mut app = app_with_interfaces();
+        let output = render(&mut app, 120, 40);
+        for header in ["RX/s", "TX/s", "RX TOTAL", "TX TOTAL", "MAC"] {
+            assert!(
+                output.contains(header),
+                "header {header:?} was cut: {output}"
+            );
+        }
+        assert!(
+            output.contains("aa:bb:cc:dd:ee:ff"),
+            "the MAC must be readable: {output}"
+        );
     }
 
     #[test]
