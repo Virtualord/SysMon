@@ -26,8 +26,9 @@ use crate::config::Config;
 /// would make the refresh interval meaningless.
 const SNAPSHOT_CHANNEL_CAPACITY: usize = 4;
 
-/// Largest time slice spent waiting for a key press.
-const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// Largest time slice spent waiting for a key press when no explicit timeout is
+/// given. Callers that care about CPU usage pass their own deadline instead.
+const DEFAULT_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Number of frames the "force refresh" key advances the tick without new data.
 const REFRESH_DEADLINE_FRAMES: u8 = 20;
@@ -295,10 +296,14 @@ pub struct Batch {
     pub key_pressed: bool,
 }
 
-/// Waits up to one input slice for events and folds them into the application state.
-pub fn poll_events(app: &mut App) -> io::Result<Batch> {
+/// Waits up to `timeout` for events and folds them into the application state.
+///
+/// The timeout is the whole budget for the call, not a per-event one: the loop below
+/// returns as soon as the deadline passes, so an idle application spends no CPU
+/// spinning on the terminal.
+pub fn poll_events(app: &mut App, timeout: Duration) -> io::Result<Batch> {
     let mut batch = Batch::default();
-    let deadline = Instant::now() + INPUT_POLL_INTERVAL;
+    let deadline = Instant::now() + timeout.max(DEFAULT_INPUT_POLL_INTERVAL);
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -462,7 +467,7 @@ pub fn apply(app: &mut App, action: Action) {
             app.search_active = false;
         }
         Action::SearchBackspace => {
-            app.search.text.pop();
+            app.search_backspace();
         }
         Action::InsertChar(_) => {}
         Action::SelectPrevious => app.move_selection(-1),
@@ -519,12 +524,14 @@ pub fn apply(app: &mut App, action: Action) {
         Action::SortByMemory => app.set_sort(crate::collector::processes::SortKey::Memory),
         Action::SortByPid => app.set_sort(crate::collector::processes::SortKey::Pid),
         Action::SortByName => app.set_sort(crate::collector::processes::SortKey::Name),
-        Action::ToggleSortDirection => app.sort_descending = !app.sort_descending,
+        Action::ToggleSortDirection => app.toggle_sort_direction(),
         Action::CycleFilter => {
-            app.filter = next_filter(app.filter);
+            let next = next_filter(app.filter());
+            app.set_filter(next);
         }
         Action::CycleSearchField => {
-            app.search.field = next_search_field(app.search.field);
+            let next = next_search_field(app.search().field);
+            app.set_search_field(next);
         }
         Action::ToggleGraphStyle => {
             app.config.unicode_graphs = !app.config.unicode_graphs;
@@ -698,9 +705,9 @@ mod tests {
         application.start_search();
         // The character goes into the query instead of triggering the `c` binding.
         assert_eq!(handle_key(&mut application, Key::Char('c')), Action::None);
-        assert_eq!(application.search.text, "c");
+        assert_eq!(application.search().text, "c");
         assert_eq!(
-            application.sort_key,
+            application.sort_key(),
             crate::collector::processes::SortKey::Cpu
         );
     }
@@ -712,7 +719,7 @@ mod tests {
         handle_key(&mut application, Key::Char('a'));
         assert_eq!(handle_key(&mut application, Key::Esc), Action::None);
         assert!(!application.search_active);
-        assert!(application.search.text.is_empty());
+        assert!(application.search().text.is_empty());
     }
 
     #[test]
@@ -722,7 +729,7 @@ mod tests {
         handle_key(&mut application, Key::Char('a'));
         handle_key(&mut application, Key::Enter);
         assert!(!application.search_active);
-        assert_eq!(application.search.text, "a");
+        assert_eq!(application.search().text, "a");
     }
 
     #[test]
@@ -732,7 +739,7 @@ mod tests {
         handle_key(&mut application, Key::Char('a'));
         assert_eq!(handle_key(&mut application, Key::Tab), Action::None);
         assert!(!application.search_active);
-        assert_eq!(application.search.text, "a");
+        assert_eq!(application.search().text, "a");
     }
 
     #[test]
