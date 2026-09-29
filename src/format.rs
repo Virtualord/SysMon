@@ -66,7 +66,11 @@ pub fn cpu_percent(value: f32) -> String {
 
 /// Formats a load average value with two decimals.
 pub fn load_average(value: f64) -> String {
-    if value.is_finite() { format!("{value:.2}") } else { NOT_AVAILABLE.to_string() }
+    if value.is_finite() {
+        format!("{value:.2}")
+    } else {
+        NOT_AVAILABLE.to_string()
+    }
 }
 
 /// Formats a duration given in seconds as `3d 4h 12m`, `4h 12m` or `12m 03s`.
